@@ -93,10 +93,14 @@ class Worker:
 
         job_type = get_job_type(job.type)
         if job_type is None:
-            # poison message: unknown type slipped past API validation
+            # poison message: unknown type slipped past API validation. It can
+            # never succeed, so fail it permanently instead of burning retries.
             await self._finalize_failure(
-                job, {"type": "UnknownJobType", "message": f"no handler for '{job.type}'"}
+                job,
+                {"type": "UnknownJobType", "message": f"no handler for '{job.type}'"},
+                permanent=True,
             )
+            log.error("unknown job type, failed permanently")
             return
 
         heartbeat = asyncio.create_task(self._heartbeat_loop(job.id))
@@ -137,9 +141,11 @@ class Worker:
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
 
-    async def _finalize_failure(self, job: Job, error: dict) -> None:
+    async def _finalize_failure(self, job: Job, error: dict, permanent: bool = False) -> None:
         async with self.session_factory() as session:
-            await state.fail_job(session, self.queue, job, error, self.settings)
+            await state.fail_job(
+                session, self.queue, job, error, self.settings, permanent=permanent
+            )
             await session.commit()
 
     def _make_context(self, job: Job) -> JobContext:
@@ -182,7 +188,7 @@ class Worker:
 
     # --- maintenance (scheduler + reaper) --------------------------------
 
-    async def run_maintenance_once(self) -> dict:
+    async def run_maintenance_once(self) -> dict[str, int]:
         """One sweep: promote due scheduled jobs, reap crashed workers'
         jobs. Safe to run from any number of workers (all ops are CAS);
         the Redis lock merely elects one to avoid redundant sweeps."""

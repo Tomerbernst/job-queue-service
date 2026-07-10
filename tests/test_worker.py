@@ -7,10 +7,27 @@ the worker/state layer directly.
 import asyncio
 from datetime import timedelta
 
+from pydantic import BaseModel
 from sqlalchemy import update
 
 from app import state
+from app.jobs.registry import job_handler
 from app.models import Job, JobStatus, new_id, utcnow
+
+
+class _AnyPayload(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+@job_handler("test_timeout", payload_model=_AnyPayload, timeout=0.05)
+async def _slow_handler(ctx):
+    await asyncio.sleep(1)  # real sleep, exceeds the 0.05s timeout
+    return {}
+
+
+@job_handler("test_boom", payload_model=_AnyPayload)
+async def _boom_handler(ctx):
+    raise ValueError("unexpected kaboom")
 
 
 async def _insert_job(session_factory, **overrides) -> str:
@@ -163,6 +180,45 @@ async def test_no_duplicate_processing_under_concurrency(session_factory, queue,
         ).scalar_one()
     assert completed == n
     assert max_attempts == 1
+
+
+async def test_job_timeout_is_recorded_and_retried(session_factory, queue, worker):
+    """A handler exceeding its type's timeout fails with JobTimeout and, with
+    attempts remaining, is scheduled for a retry."""
+    job_id = await _insert_job(session_factory, type="test_timeout")
+    await worker.process_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+    assert job.status == JobStatus.SCHEDULED
+    assert job.error["type"] == "JobTimeout"
+
+
+async def test_unexpected_exception_captures_traceback(session_factory, queue, worker):
+    """A handler raising a bare exception (not JobFailure) is recorded with its
+    type and a traceback, then retried."""
+    job_id = await _insert_job(session_factory, type="test_boom")
+    await worker.process_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+    assert job.status == JobStatus.SCHEDULED
+    assert job.error["type"] == "ValueError"
+    assert "traceback" in job.error
+
+
+async def test_unknown_job_type_fails_permanently(session_factory, queue, worker):
+    """A job whose type has no handler can never succeed, so it is failed
+    permanently and dead-lettered on the first attempt — not retried."""
+    job_id = await _insert_job(session_factory, type="ghost")
+    await worker.process_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+    assert job.status == JobStatus.FAILED   # not SCHEDULED — no wasted retries
+    assert job.attempts == 1
+    assert job.error["type"] == "UnknownJobType"
+    assert await queue.dlq_length() == 1
 
 
 async def test_orphaned_pending_is_requeued(session_factory, queue, worker, settings):

@@ -87,7 +87,13 @@ async def _get_job_or_404(session: AsyncSession, job_id: str) -> Job:
     return job
 
 
-@router.post("/jobs", status_code=201)
+async def _existing_by_idempotency_key(session: AsyncSession, key: str) -> Job | None:
+    return (
+        await session.execute(select(Job).where(Job.idempotency_key == key))
+    ).scalar_one_or_none()
+
+
+@router.post("/jobs", status_code=201, response_model=JobResponse)
 async def submit_job(
     body: Annotated[JobSubmit, Body(openapi_examples=SUBMIT_EXAMPLES)],
     response: Response,
@@ -116,17 +122,13 @@ async def submit_job(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=json.loads(exc.json())) from exc
     payload = validated.model_dump(mode="json")
-    if len(json.dumps(payload)) > settings.max_payload_bytes:
+    if len(json.dumps(payload).encode("utf-8")) > settings.max_payload_bytes:
         raise HTTPException(status_code=413, detail="payload too large")
 
     async with session_factory() as session:
         # idempotency fast path
         if body.idempotency_key:
-            existing = (
-                await session.execute(
-                    select(Job).where(Job.idempotency_key == body.idempotency_key)
-                )
-            ).scalar_one_or_none()
+            existing = await _existing_by_idempotency_key(session, body.idempotency_key)
             if existing is not None:
                 response.status_code = 200
                 return JobResponse(**existing.to_dict())
@@ -153,13 +155,13 @@ async def submit_job(
             await session.commit()
         except IntegrityError:
             # two racing submits with the same idempotency key: the unique
-            # index is the authoritative guard — return the winner's job
+            # index is the authoritative guard — return the winner's job. Only
+            # the idempotency index can cause this; if there's no key, the
+            # violation is something else and must not be swallowed.
             await session.rollback()
-            existing = (
-                await session.execute(
-                    select(Job).where(Job.idempotency_key == body.idempotency_key)
-                )
-            ).scalar_one_or_none()
+            if not body.idempotency_key:
+                raise
+            existing = await _existing_by_idempotency_key(session, body.idempotency_key)
             if existing is None:
                 raise
             response.status_code = 200
@@ -217,13 +219,22 @@ async def get_job(job_id: str, session_factory=Depends(get_session_factory)):
 
 
 @router.get("/jobs/{job_id}/logs")
-async def get_job_logs(job_id: str, session_factory=Depends(get_session_factory)):
-    """Get a job's state-transition log trail (submitted, claimed, completed, ...)."""
+async def get_job_logs(
+    job_id: str,
+    limit: Annotated[int, Query(ge=1, le=500, description="Page size")] = 100,
+    offset: Annotated[int, Query(ge=0, description="Rows to skip")] = 0,
+    session_factory=Depends(get_session_factory),
+):
+    """Get a job's state-transition log trail (submitted, claimed, completed, ...). Paged."""
     async with session_factory() as session:
         await _get_job_or_404(session, job_id)
         logs = (
             (await session.execute(
-                select(JobLog).where(JobLog.job_id == job_id).order_by(JobLog.created_at)
+                select(JobLog)
+                .where(JobLog.job_id == job_id)
+                .order_by(JobLog.created_at)
+                .limit(limit)
+                .offset(offset)
             ))
             .scalars()
             .all()
@@ -237,13 +248,13 @@ async def cancel_job(job_id: str, session_factory=Depends(get_session_factory)):
     async with session_factory() as session:
         job = await _get_job_or_404(session, job_id)
         cancelled = await state.cancel_job(session, job_id)
-        await session.commit()
         if not cancelled:
             raise HTTPException(
                 status_code=409,
                 detail=f"cannot cancel job in status '{job.status.value}' "
                        "(only pending/scheduled jobs can be cancelled)",
             )
+        await session.commit()
         await session.refresh(job)
         logger.info("job cancelled", job_id=job_id, job_type=job.type)
         return JobResponse(**job.to_dict())
@@ -259,13 +270,13 @@ async def retry_job(
     async with session_factory() as session:
         job = await _get_job_or_404(session, job_id)
         retried = await state.retry_job(session, job_id)
-        await session.commit()
         if retried is None:
             raise HTTPException(
                 status_code=409,
                 detail=f"cannot retry job in status '{job.status.value}' "
                        "(only failed jobs can be retried)",
             )
+        await session.commit()
         await queue.enqueue(retried.id, retried.priority, retried.created_at)
         logger.info("job retried", job_id=job_id, job_type=retried.type)
         return JobResponse(**retried.to_dict())

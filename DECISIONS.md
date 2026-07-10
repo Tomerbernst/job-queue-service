@@ -179,3 +179,27 @@ A few honest simplifications:
 - **Reaping relies on per-node clocks.** Significant clock skew between workers
   could reap slightly early/late. A DB-side `now()` for all time comparisons
   would remove the dependency.
+- **No authentication / authorization.** Every endpoint is open, including
+  `/health` (which exposes queue depth and worker counts). This is a deliberate
+  scope cut for the exercise; in production the service would sit behind an API
+  gateway or an auth dependency (API key / JWT), and `/health` would be split
+  into a public liveness probe and an authenticated detailed-stats endpoint.
+- **The webhook handler is a mock and never fetches the URL.** So there is no
+  live SSRF surface today, and URL validation only checks the scheme. If the
+  handler were made real, the URL would need SSRF hardening (reject
+  loopback/RFC-1918/link-local/cloud-metadata addresses, and re-check after DNS
+  resolution to defeat rebinding) at both submit and fetch time.
+- **Maintenance-loop election is best-effort, not a true distributed lock.** The
+  Redis lock only avoids redundant sweeps; because every sweep operation is a
+  CAS, a brief double-election is harmless. A correct mutual-exclusion lock would
+  use a Lua compare-and-refresh (and compare-and-release on shutdown).
+- **A dead-letter push is not transactional with the DB status flip.** The reaper
+  pushes to the DLQ inside the maintenance transaction; if that transaction then
+  rolled back (rare), the job could be reaped and dead-lettered again on a later
+  sweep, producing a duplicate DLQ entry. A transactional outbox, or de-duping
+  the DLQ by `job_id`, would close this.
+- **Payload size is capped after parsing, not before.** The `max_payload_bytes`
+  check runs post-parse (now measured in UTF-8 bytes), so it rejects oversized
+  payloads from being stored but does not prevent a large-body memory spike
+  during parsing — that belongs at the proxy / ASGI layer (a `Content-Length` /
+  streaming body limit) in a real deployment.

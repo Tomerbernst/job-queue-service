@@ -4,6 +4,7 @@ Adding a new job type is one decorated async function plus a payload
 schema — the API, worker, retry and timeout machinery pick it up
 automatically.
 """
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Type
 
@@ -29,25 +30,30 @@ class JobContext:
     log: Callable[..., Awaitable[None]]  # (level, message, **metadata)
 
     async def sleep(self, seconds: float) -> None:
-        import asyncio
-
         await asyncio.sleep(seconds * self.settings.job_speed_factor)
+
+
+JobHandler = Callable[["JobContext"], Awaitable[dict[str, Any]]]
+
+DEFAULT_TIMEOUT = 60.0
 
 
 @dataclass
 class JobTypeDef:
     name: str
-    handler: Callable[[JobContext], Awaitable[dict]]
+    handler: JobHandler
     payload_model: Type[BaseModel]
-    timeout: float = 60.0
-    extra: dict = field(default_factory=dict)
+    timeout: float = DEFAULT_TIMEOUT
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 JOB_TYPES: dict[str, JobTypeDef] = {}
 
 
-def job_handler(name: str, payload_model: Type[BaseModel], timeout: float = 60.0):
-    def decorator(fn: Callable[[JobContext], Awaitable[dict]]):
+def job_handler(name: str, payload_model: Type[BaseModel], timeout: float = DEFAULT_TIMEOUT):
+    def decorator(fn: JobHandler) -> JobHandler:
+        if name in JOB_TYPES:
+            raise ValueError(f"duplicate job type registration: {name!r}")
         JOB_TYPES[name] = JobTypeDef(
             name=name, handler=fn, payload_model=payload_model, timeout=timeout
         )

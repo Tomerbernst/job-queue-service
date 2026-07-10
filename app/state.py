@@ -100,25 +100,31 @@ async def fail_job(
     job: Job,
     error: dict,
     settings: Settings,
-) -> JobStatus:
+    permanent: bool = False,
+) -> JobStatus | None:
     """Handle a failed attempt: schedule a retry with backoff, or mark
-    permanently FAILED (and dead-letter) once attempts are exhausted.
-    Returns the resulting status."""
-    if job.attempts >= job.max_attempts:
+    permanently FAILED (and dead-letter) once attempts are exhausted (or
+    immediately when ``permanent`` is set, e.g. an unknown job type that can
+    never succeed).
+
+    Returns the resulting status, or ``None`` if the compare-and-set matched
+    no row (the job was already completed or re-owned) so the caller can avoid
+    reporting a transition that did not happen.
+    """
+    if permanent or job.attempts >= job.max_attempts:
         res = await session.execute(
             update(Job)
             .where(Job.id == job.id, Job.status == JobStatus.PROCESSING)
             .values(status=JobStatus.FAILED, error=error, completed_at=utcnow())
         )
-        if res.rowcount:
-            await add_job_log(
-                session, job.id, "error",
-                f"job failed permanently after {job.attempts} attempts", error,
-            )
-            await queue.dlq_push(
-                {"job_id": job.id, "type": job.type, "error": error,
-                 "attempts": job.attempts, "failed_at": utcnow().isoformat()}
-            )
+        if not res.rowcount:
+            return None
+        reason = "permanently (unretryable)" if permanent else f"after {job.attempts} attempts"
+        await add_job_log(session, job.id, "error", f"job failed {reason}", error)
+        await queue.dlq_push(
+            {"job_id": job.id, "type": job.type, "error": error,
+             "attempts": job.attempts, "failed_at": utcnow().isoformat()}
+        )
         return JobStatus.FAILED
 
     delay = backoff_delay(job.attempts, settings)
@@ -128,11 +134,12 @@ async def fail_job(
         .where(Job.id == job.id, Job.status == JobStatus.PROCESSING)
         .values(status=JobStatus.SCHEDULED, scheduled_at=retry_at, error=error)
     )
-    if res.rowcount:
-        await add_job_log(
-            session, job.id, "warning",
-            f"attempt {job.attempts} failed, retry in {delay:.0f}s", error,
-        )
+    if not res.rowcount:
+        return None
+    await add_job_log(
+        session, job.id, "warning",
+        f"attempt {job.attempts} failed, retry in {delay:.0f}s", error,
+    )
     return JobStatus.SCHEDULED
 
 
@@ -281,22 +288,29 @@ async def requeue_orphaned_pending(
 
 
 async def reap_stale_jobs(
-    session: AsyncSession, queue: JobQueue, settings: Settings, now: datetime | None = None
+    session: AsyncSession,
+    queue: JobQueue,
+    settings: Settings,
+    now: datetime | None = None,
+    limit: int = 200,
 ) -> int:
     """Recover jobs whose worker died mid-processing.
 
     A PROCESSING job whose heartbeat is older than ``stale_after`` is
     presumed crashed: retried with backoff if attempts remain, otherwise
-    failed permanently and dead-lettered.
+    failed permanently and dead-lettered. Bounded per sweep (``limit``) so a
+    mass worker death drains over successive sweeps rather than one huge
+    transaction.
     """
     now = now or utcnow()
     threshold = now - timedelta(seconds=settings.stale_after)
     stale = (
         (
             await session.execute(
-                select(Job).where(
-                    Job.status == JobStatus.PROCESSING, Job.heartbeat_at < threshold
-                )
+                select(Job)
+                .where(Job.status == JobStatus.PROCESSING, Job.heartbeat_at < threshold)
+                .order_by(Job.heartbeat_at)
+                .limit(limit)
             )
         )
         .scalars()
@@ -309,6 +323,8 @@ async def reap_stale_jobs(
             "message": f"worker {job.worker_id} stopped heartbeating; presumed crashed",
         }
         new_status = await fail_job(session, queue, job, error, settings)
+        if new_status is None:
+            continue  # lost the CAS: the job was already finalized elsewhere
         logger.warning(
             "reaped stale job", job_id=job.id, job_type=job.type,
             dead_worker=job.worker_id, new_status=new_status.value,
