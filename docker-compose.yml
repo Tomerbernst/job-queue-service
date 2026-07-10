@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: jobqueue
+      POSTGRES_PASSWORD: jobqueue
+      POSTGRES_DB: jobqueue
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobqueue"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  api:
+    build: .
+    environment: &app_env
+      DATABASE_URL: postgresql+asyncpg://jobqueue:jobqueue@postgres:5432/jobqueue
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      # host port is configurable (set API_PORT to avoid a clash with another
+      # service on 8000); the container always listens on 8000 internally
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    build: .
+    command: python -m app.worker.main
+    environment: *app_env
+    depends_on:
+      api:
+        condition: service_healthy   # API creates the schema first
+      redis:
+        condition: service_healthy
+    # graceful shutdown: give in-flight jobs time to finish on SIGTERM
+    stop_grace_period: 30s
+    deploy:
+      replicas: 2   # multiple concurrent workers; or: docker compose up --scale worker=N
+
+volumes:
+  pgdata:
