@@ -282,6 +282,23 @@ async def retry_job(
         return JobResponse(**retried.to_dict())
 
 
+@router.get("/health/live")
+async def liveness():
+    """Cheap liveness probe (no DB/Redis work) for the container healthcheck,
+    so the frequent probe doesn't run the full-table stats query on /health."""
+    return {"status": "alive"}
+
+
+@router.get("/dead-letter")
+async def dead_letter(
+    limit: Annotated[int, Query(ge=1, le=500, description="Max entries to return")] = 100,
+    queue=Depends(get_queue),
+):
+    """Inspect the dead-letter queue: jobs that failed permanently (poison
+    messages). Use this plus GET /jobs/{id}/logs to triage repeated failures."""
+    return {"count": await queue.dlq_length(), "entries": await queue.dlq_peek(limit)}
+
+
 @router.get("/health")
 async def health(
     session_factory=Depends(get_session_factory),
@@ -289,12 +306,15 @@ async def health(
     settings=Depends(get_settings_dep),
 ):
     """Liveness plus operational stats: DB/Redis reachability, queue depth,
-    dead-letter size, live workers, and a count of jobs in each status."""
+    dead-letter size, live workers, per-status job counts, and the age of the
+    oldest waiting/running job (for spotting a stuck or slow queue)."""
     db_ok = True
     counts: dict = {}
+    ages: dict = {}
     try:
         async with session_factory() as session:
             counts = await state.status_counts(session)
+            ages = await state.queue_ages(session)
     except Exception:
         db_ok = False
 
@@ -312,4 +332,5 @@ async def health(
         body["workers"] = await queue.active_workers(settings.worker_ttl)
     if db_ok:
         body["jobs"] = counts
+        body["queue_age"] = ages
     return body

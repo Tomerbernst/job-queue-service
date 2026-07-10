@@ -128,7 +128,9 @@ curl -s -X POST http://localhost:8000/jobs -H 'Content-Type: application/json' \
 | `GET /jobs/{id}/logs`    | Per-job structured log of state transitions    |
 | `POST /jobs/{id}/cancel` | Cancel a pending/scheduled job                 |
 | `POST /jobs/{id}/retry`  | Re-queue a permanently failed job              |
-| `GET /health`            | Liveness + queue depth, DLQ size, live workers |
+| `GET /health`            | Stats: queue depth, DLQ size, workers, per-status counts, oldest-job ages |
+| `GET /health/live`       | Cheap liveness probe (used by the container healthcheck) |
+| `GET /dead-letter`       | Inspect dead-letter (poison) jobs for triage   |
 
 ---
 

@@ -129,6 +129,19 @@ async def test_scheduled_job_promoted_when_due(session_factory, queue, worker):
         assert (await session.get(Job, due_id)).status == JobStatus.PENDING
         assert (await session.get(Job, not_due_id)).status == JobStatus.SCHEDULED
 
+    # the scheduled -> pending transition is logged (observability: no invisible hop)
+    from sqlalchemy import select
+
+    from app.models import JobLog
+
+    async with session_factory() as session:
+        messages = (
+            await session.execute(
+                select(JobLog.message).where(JobLog.job_id == due_id)
+            )
+        ).scalars().all()
+    assert any("promoted to pending" in m for m in messages)
+
 
 async def test_graceful_shutdown_finishes_inflight_job(session_factory, queue, worker):
     """run() must drain the in-flight job after a shutdown request."""

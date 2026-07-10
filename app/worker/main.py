@@ -31,7 +31,9 @@ async def main() -> None:
     settings = get_settings()
     logger = get_logger(service="worker")
 
-    engine = create_engine(settings.database_url)
+    # size the pool for the worker's concurrent per-job sessions
+    pool_size = max(settings.db_pool_size, settings.worker_concurrency * 2)
+    engine = create_engine(settings.database_url, pool_size, settings.db_max_overflow)
     session_factory = create_session_factory(engine)
     redis = create_redis(settings.redis_url)
     queue = JobQueue(redis)

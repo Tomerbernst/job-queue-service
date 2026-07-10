@@ -2,9 +2,13 @@
 
 ## Tools I Used
 
-- **Claude (Anthropic)** — used as a pair-programming assistant for scaffolding
-  the FastAPI/SQLAlchemy/Redis boilerplate, drafting the docker-compose setup,
-  and generating the first pass of the test suite.
+- **Claude (Anthropic), via the Claude Code CLI in the terminal** — used as a
+  pair-programming assistant for scaffolding the FastAPI/SQLAlchemy/Redis
+  boilerplate, drafting the docker-compose setup, generating the first pass of
+  the test suite, and running an adversarial multi-agent code review of the
+  concurrency logic.
+- Editor: VS Code with its Python/Pylance language server for inline type
+  checking while integrating and reviewing the generated code.
 
 ## What Helped Most
 

@@ -1,7 +1,8 @@
 """FastAPI app factory. The API owns schema creation on startup."""
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 import app.jobs as _jobs  # noqa: F401  (import registers job types; alias avoids shadowing the FastAPI `app` defined below)
 from app.api.routes import router
@@ -25,7 +26,9 @@ def create_app(
     async def lifespan(application: FastAPI):
         configure_logging()
         if manage_resources:
-            engine = create_engine(settings.database_url)
+            engine = create_engine(
+                settings.database_url, settings.db_pool_size, settings.db_max_overflow
+            )
             await init_db(engine)
             redis = create_redis(settings.redis_url)
             application.state.session_factory = create_session_factory(engine)
@@ -42,6 +45,15 @@ def create_app(
         # injected resources (tests): available immediately, no lifespan needed
         application.state.session_factory = session_factory
         application.state.queue = queue
+
+    @application.middleware("http")
+    async def limit_body_size(request: Request, call_next):
+        # reject oversized bodies before parsing them into memory
+        cl = request.headers.get("content-length")
+        if cl is not None and cl.isdigit() and int(cl) > settings.max_payload_bytes:
+            return JSONResponse(status_code=413, content={"detail": "payload too large"})
+        return await call_next(request)
+
     application.include_router(router)
     return application
 

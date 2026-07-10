@@ -16,11 +16,7 @@ async def process_batch(ctx: JobContext) -> dict:
     await ctx.log("info", "batch started", total_items=total)
     for i, _item in enumerate(payload.items):
         await ctx.sleep(random.uniform(0.05, 0.2))
-        # simulate rare per-item failure without failing the whole batch
-        if random.random() < 0.02:
-            failed += 1
-        else:
-            succeeded += 1
+        succeeded += 1
 
         progress = int((i + 1) / total * 100)
         if progress != last_reported:  # avoid a DB write per item at same %

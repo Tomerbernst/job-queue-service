@@ -107,8 +107,11 @@ for future-dated jobs.
 
 On failure a job is set to `status='scheduled'` with `scheduled_at = now + delay`
 where `delay = base * factor^(attempts-1)`. The maintenance sweep promotes it
-back into the queue once due. This reuses the scheduled-job machinery — retries
-and future-dated submissions are the same code path.
+back into the queue once due.
+
+**Why:** reusing the scheduled-job machinery means retries and future-dated
+submissions travel the exact same promotion code path — one mechanism to reason
+about and test, and a backoff retry is literally "a job scheduled for later."
 
 **Timing:** `base = 30s`, `factor = 4`, capped at 1h, max 3 attempts:
 

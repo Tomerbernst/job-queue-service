@@ -7,7 +7,7 @@ transition: exactly one racer's UPDATE matches, the rest see rowcount 0.
 Used by both the API layer and the worker — and tested independently of
 the API.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import func, or_, select, update
@@ -230,6 +230,7 @@ async def promote_due_jobs(
 
     for job_id, priority, created_at in rows:
         await queue.enqueue(job_id, priority, created_at)
+        await add_job_log(session, job_id, "info", "promoted to pending (scheduled time reached)", None)
 
     await session.execute(
         update(Job)
@@ -341,3 +342,37 @@ async def status_counts(session: AsyncSession) -> dict[str, int]:
     for status, count in rows:
         counts[status.value] = count
     return counts
+
+
+async def queue_ages(session: AsyncSession, now: datetime | None = None) -> dict[str, float | None]:
+    """Age (seconds) of the oldest waiting/running job — the signals that
+    distinguish a queue draining fast from one that is wedged. Cheap: served
+    by the ``(status, ...)`` indexes.
+
+    - oldest_pending_age: how long the longest-waiting PENDING job has waited.
+    - oldest_processing_age: how long the longest-running PROCESSING job has run
+      (a large value points at a slow or stuck worker).
+    """
+    now = now or utcnow()
+    oldest_pending = (
+        await session.execute(
+            select(func.min(Job.created_at)).where(Job.status == JobStatus.PENDING)
+        )
+    ).scalar_one_or_none()
+    oldest_processing = (
+        await session.execute(
+            select(func.min(Job.started_at)).where(Job.status == JobStatus.PROCESSING)
+        )
+    ).scalar_one_or_none()
+
+    def _age(dt: datetime | None) -> float | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:  # SQLite returns naive UTC; normalise before diff
+            dt = dt.replace(tzinfo=timezone.utc)
+        return round((now - dt).total_seconds(), 1)
+
+    return {
+        "oldest_pending_age_seconds": _age(oldest_pending),
+        "oldest_processing_age_seconds": _age(oldest_processing),
+    }

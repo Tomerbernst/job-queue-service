@@ -67,6 +67,11 @@ class JobQueue:
     async def dlq_length(self) -> int:
         return await self.redis.llen(DLQ_KEY)
 
+    async def dlq_peek(self, limit: int = 100) -> list[dict]:
+        """Return the most recent dead-letter entries (newest first) for triage."""
+        raw = await self.redis.lrange(DLQ_KEY, -limit, -1)
+        return [json.loads(item) for item in reversed(raw)]
+
     # --- worker registry ------------------------------------------------
     async def worker_heartbeat(self, worker_id: str) -> None:
         now = datetime.now(timezone.utc).timestamp()

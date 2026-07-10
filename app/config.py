@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://jobqueue:jobqueue@localhost:5432/jobqueue"
     redis_url: str = "redis://localhost:6379/0"
 
+    # DB connection pool. A worker opens several short-lived sessions per job
+    # (claim, per-heartbeat, progress, complete) plus the maintenance loop, so
+    # the default pool of 5 can throttle throughput under concurrency.
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+
     # Worker behaviour
     worker_concurrency: int = 4          # concurrent jobs per worker process
     dequeue_timeout: float = 2.0         # BZPOPMAX block time; also the shutdown latency bound

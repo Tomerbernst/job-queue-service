@@ -4,14 +4,30 @@ Payload models use extra="forbid" plus field-level constraints so untrusted
 payload data is rejected at the API boundary — malformed jobs never reach
 the queue (queue-poisoning defence).
 """
+import ipaddress
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _URL_RE = re.compile(r"^https?://[^\s]+$")
+# Hostnames that must never be targeted, even though the webhook is a mock —
+# defense-in-depth against SSRF if the handler is ever made to really fetch.
+_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
+
+
+def _is_internal_host(host: str) -> bool:
+    host = host.strip("[]").lower()  # strip IPv6 brackets
+    if host in _BLOCKED_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a normal hostname; DNS-time re-check would belong at fetch
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
 
 
 # --- per-job-type payloads -------------------------------------------------
@@ -46,6 +62,9 @@ class WebhookPayload(BaseModel):
     def _valid_url(cls, v: str) -> str:
         if not _URL_RE.match(v):
             raise ValueError("invalid http(s) URL")
+        host = urlparse(v).hostname or ""
+        if _is_internal_host(host):
+            raise ValueError("url targets an internal/loopback/metadata host")
         return v
 
 
