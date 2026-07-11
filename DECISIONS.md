@@ -143,8 +143,9 @@ A few honest simplifications:
   (gradually raising effective priority with wait time).
 - **Schema is created with `create_all` on startup, not Alembic migrations.**
   Fine for the assignment, wrong for anything that has to evolve in production.
-- **DLQ has no automated replay tooling** beyond the manual `POST /retry`
-  endpoint — I'd add a DLQ inspection/requeue admin path.
+- **DLQ has inspection but no automated replay.** `GET /dead-letter` lists
+  poison jobs for triage, but requeuing them is still the manual `POST /retry`
+  per job; a bulk requeue admin path would be the next step.
 
 ---
 
@@ -185,13 +186,14 @@ A few honest simplifications:
 - **No authentication / authorization.** Every endpoint is open, including
   `/health` (which exposes queue depth and worker counts). This is a deliberate
   scope cut for the exercise; in production the service would sit behind an API
-  gateway or an auth dependency (API key / JWT), and `/health` would be split
-  into a public liveness probe and an authenticated detailed-stats endpoint.
-- **The webhook handler is a mock and never fetches the URL.** So there is no
-  live SSRF surface today, and URL validation only checks the scheme. If the
-  handler were made real, the URL would need SSRF hardening (reject
-  loopback/RFC-1918/link-local/cloud-metadata addresses, and re-check after DNS
-  resolution to defeat rebinding) at both submit and fetch time.
+  gateway or an auth dependency (API key / JWT). The liveness/stats split is
+  already in place (`/health/live` is a cheap public probe, `/health` carries
+  the detailed stats), so only the auth layer itself is missing.
+- **The webhook handler is a mock and never fetches the URL,** so there is no
+  live SSRF surface. As defense-in-depth for if it were ever made real, the URL
+  validator already rejects loopback / RFC-1918 / link-local / cloud-metadata
+  hosts at submit time. The one piece that can't apply to a mock is a re-check
+  after DNS resolution at fetch time (to defeat DNS rebinding).
 - **Maintenance-loop election is best-effort, not a true distributed lock.** The
   Redis lock only avoids redundant sweeps; because every sweep operation is a
   CAS, a brief double-election is harmless. A correct mutual-exclusion lock would
@@ -201,8 +203,9 @@ A few honest simplifications:
   rolled back (rare), the job could be reaped and dead-lettered again on a later
   sweep, producing a duplicate DLQ entry. A transactional outbox, or de-duping
   the DLQ by `job_id`, would close this.
-- **Payload size is capped after parsing, not before.** The `max_payload_bytes`
-  check runs post-parse (now measured in UTF-8 bytes), so it rejects oversized
-  payloads from being stored but does not prevent a large-body memory spike
-  during parsing — that belongs at the proxy / ASGI layer (a `Content-Length` /
-  streaming body limit) in a real deployment.
+- **Payload size is capped in two places, but a proxy limit is still ideal.** A
+  middleware rejects requests whose `Content-Length` exceeds `max_payload_bytes`
+  before the body is parsed, and a post-parse UTF-8 byte check backs it up. This
+  covers the common cases; a hard body-size limit at the reverse proxy / ASGI
+  server is still the belt-and-suspenders defense for a real deployment (e.g. a
+  chunked request with no `Content-Length`).
