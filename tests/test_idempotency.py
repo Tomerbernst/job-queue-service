@@ -1,13 +1,25 @@
 """Duplicate submissions with the same idempotency key return the existing job."""
+import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
-from app.models import Job
+from app.models import Job, new_id
 
 EMAIL_JOB = {
     "type": "email",
     "payload": {"to": "a@b.co", "subject": "x"},
     "idempotency_key": "order-1234-confirmation",
 }
+
+
+async def test_unique_key_constraint_blocks_duplicate(session_factory):
+    """The authoritative guard behind the idempotency race handling: the DB
+    unique index physically refuses a second row with the same key."""
+    async with session_factory() as session:
+        session.add(Job(id=new_id(), type="email", payload={}, idempotency_key="dup"))
+        session.add(Job(id=new_id(), type="email", payload={}, idempotency_key="dup"))
+        with pytest.raises(IntegrityError):
+            await session.commit()
 
 
 async def test_duplicate_submission_returns_existing_job(api_client, session_factory):

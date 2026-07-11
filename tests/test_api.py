@@ -163,3 +163,34 @@ async def test_health_degraded_when_db_unavailable(queue, settings):
     assert body["status"] == "degraded"
     assert body["database"] == "unavailable"
     assert body["redis"] == "ok"
+
+
+async def test_health_degraded_when_redis_unavailable(session_factory, settings):
+    """If Redis is unreachable, /health reports degraded rather than 500."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api.main import create_app
+
+    class _DeadQueue:
+        async def ping(self):
+            return False
+
+    app = create_app(
+        settings=settings, session_factory=session_factory,
+        queue=_DeadQueue(), manage_resources=False,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        body = (await client.get("/health")).json()
+    assert body["status"] == "degraded"
+    assert body["redis"] == "unavailable"
+    assert body["database"] == "ok"
+
+
+async def test_oversized_payload_rejected(api_client, settings):
+    """A payload larger than max_payload_bytes is rejected with 413, not stored."""
+    # 1000 items x ~100 chars comfortably exceeds the 64 KiB cap while still
+    # passing per-type validation (batch allows up to 1000 items)
+    items = ["x" * 100 for _ in range(1000)]
+    resp = await api_client.post("/jobs", json={"type": "batch", "payload": {"items": items}})
+    assert resp.status_code == 413

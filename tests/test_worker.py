@@ -72,6 +72,33 @@ async def test_cancelled_job_cannot_be_claimed(session_factory, worker):
     assert claimed is None
 
 
+async def test_late_completion_cannot_overwrite_new_owner(session_factory):
+    """A slow worker whose job was reaped and re-owned by another worker must
+    not clobber the new owner's result: completion is worker_id-scoped (CAS)."""
+    job_id = await _insert_job(session_factory)
+    async with session_factory() as session:
+        await state.claim_job(session, job_id, "slow-worker")
+        await session.commit()
+    # simulate the reaper re-owning the job to a new worker
+    async with session_factory() as session:
+        await session.execute(
+            update(Job).where(Job.id == job_id).values(worker_id="new-worker")
+        )
+        await session.commit()
+
+    # the slow worker's late completion must fail the CAS and change nothing
+    async with session_factory() as session:
+        ok = await state.complete_job(session, job_id, "slow-worker", {"stale": True})
+        await session.commit()
+    assert ok is False
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+    assert job.status == JobStatus.PROCESSING   # not completed by the stale worker
+    assert job.result is None
+    assert job.worker_id == "new-worker"
+
+
 async def test_crash_recovery_reaps_stale_processing_job(session_factory, queue, worker, settings):
     """A processing job with an old heartbeat is presumed crashed and retried."""
     job_id = await _insert_job(session_factory)
