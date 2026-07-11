@@ -5,7 +5,7 @@ schema — the API, worker, retry and timeout machinery pick it up
 automatically.
 """
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Type
 
 from pydantic import BaseModel
@@ -44,7 +44,6 @@ class JobTypeDef:
     handler: JobHandler
     payload_model: Type[BaseModel]
     timeout: float = DEFAULT_TIMEOUT
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 JOB_TYPES: dict[str, JobTypeDef] = {}

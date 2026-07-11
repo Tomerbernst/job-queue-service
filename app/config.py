@@ -34,9 +34,6 @@ class Settings(BaseSettings):
     job_speed_factor: float = 1.0        # multiplier on simulated sleeps (0 in tests)
     max_payload_bytes: int = 64 * 1024   # reject oversized payloads at the API
 
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-
 
 @lru_cache
 def get_settings() -> Settings:
